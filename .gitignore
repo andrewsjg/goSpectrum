@@ -1,0 +1,23 @@
+# Binary
+/spectrum
+*.exe
+Games
+.specify
+.pi
+# User-supplied Sinclair ROM (never commit)
+rom/*.rom
+specs 
+
+
+# Go
+*.test
+*.out
+vendor/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.tmp
+*.swp
+.vscode/
+.idea/
