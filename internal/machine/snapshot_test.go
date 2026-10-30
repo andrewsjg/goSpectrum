@@ -77,3 +77,62 @@ func TestRefusedSnapshotLeavesState(t *testing.T) {
 		t.Fatal(m.Status())
 	}
 }
+
+func TestSnapshotRoundTrip(t *testing.T) {
+	m := New()
+	m.mem.RAM[100] = 0x42
+	m.cpu.A, m.cpu.SP, m.cpu.PC, m.cpu.IM = 0x77, 0xFF00, 0x8001, 1
+	m.cpu.Halted = true
+	m.border = 3
+	s := m.Snapshot()
+	if s.PC != 0x8000 || s.Model128 {
+		t.Fatalf("halted PC %04X", s.PC)
+	}
+	fresh := New()
+	fresh.ApplySnapshot(s)
+	if fresh.mem.RAM[100] != 0x42 || fresh.cpu.A != 0x77 || fresh.cpu.SP != 0xFF00 || fresh.border != 3 {
+		t.Fatal("48K state not restored")
+	}
+
+	m128 := new128(t)
+	m128.writePage(0x14)
+	m128.banks[4][7] = 0x99
+	m128.ay.selectReg(8)
+	m128.ay.write(0x0F)
+	s = m128.Snapshot()
+	if !s.Model128 || s.Page != 0x14 || s.Banks[4][7] != 0x99 || s.AYSel != 8 || s.AYReg[8] != 0x0F {
+		t.Fatalf("128K snapshot page %02X sel %d", s.Page, s.AYSel)
+	}
+	other := new128(t)
+	other.ApplySnapshot(s)
+	if other.ramPage != 4 || other.banks[4][7] != 0x99 || other.ay.reg[8] != 0x0F {
+		t.Fatal("128K state not restored")
+	}
+}
+
+func TestKempstonPort(t *testing.T) {
+	m := New()
+	m.SetJoystick(JoyUp | JoyFire)
+	if got := m.IORead(0x001F); got != JoyUp|JoyFire {
+		t.Fatalf("port 0x1F %02X", got)
+	}
+	if m.IORead(0x00FF) == JoyUp|JoyFire {
+		t.Fatal("A5 high read the joystick")
+	}
+}
+
+func TestTapeProgress(t *testing.T) {
+	var p Player
+	if p.Progress() != 0 {
+		t.Fatal("empty tape")
+	}
+	p.Arm([]Pulse{{true, 100}, {false, 300}}, false)
+	p.Advance(200)
+	if p.Progress() != 0.5 {
+		t.Fatalf("half way %v", p.Progress())
+	}
+	p.Advance(500)
+	if p.Progress() != 1 {
+		t.Fatal("finished tape")
+	}
+}

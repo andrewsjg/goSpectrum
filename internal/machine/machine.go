@@ -72,6 +72,7 @@ type Machine struct {
 	tape      Player
 	tapeHold  bool
 	autoload  bool
+	joy       byte
 }
 
 func New() *Machine {
@@ -96,6 +97,57 @@ func (m *Machine) Paused() bool      { return m.paused }
 func (m *Machine) TapePlaying() bool { return m.tape.Playing() && !m.tapeHold }
 
 func (m *Machine) SetHostKeys(rows [8]byte) { m.host = rows }
+
+// Kempston joystick bits, active high, as read from port 0x1F.
+const (
+	JoyRight byte = 1 << iota
+	JoyLeft
+	JoyDown
+	JoyUp
+	JoyFire
+)
+
+// SetJoystick sets the Kempston port. Any odd port with A5 low reads it.
+func (m *Machine) SetJoystick(bits byte) { m.joy = bits & 0x1F }
+
+// TapeProgress is the played fraction of the armed tape, 0 to 1.
+func (m *Machine) TapeProgress() float64 { return m.tape.Progress() }
+
+// Charset is the 8×8 character set of the 48K BASIC ROM in use.
+func (m *Machine) Charset() []byte {
+	if m.model128 {
+		return Charset(m.roms[1][:])
+	}
+	return Charset(m.mem.ROM[:])
+}
+
+// Snapshot captures registers, RAM, the border, and on a 128K the banks,
+// the 0x7FFD latch, and the AY. Snapshot files have no halted flag, so a
+// halted CPU is saved with PC on its HALT, which runs again on restore.
+func (m *Machine) Snapshot() Snap {
+	c := &m.cpu
+	s := Snap{
+		A: c.A, F: c.F, B: c.B, C: c.C, D: c.D, E: c.E, H: c.H, L: c.L,
+		Ap: c.Ap, Fp: c.Fp, Bp: c.Bp, Cp: c.Cp, Dp: c.Dp, Ep: c.Ep, Hp: c.Hp, Lp: c.Lp,
+		IX: c.IX, IY: c.IY, SP: c.SP, PC: c.PC, I: c.I, R: c.R,
+		IFF1: c.IFF1, IFF2: c.IFF2, IM: c.IM,
+		MEMPTR: c.MEMPTR,
+		Border: m.border,
+	}
+	if c.Halted {
+		s.PC--
+	}
+	if !m.model128 {
+		s.RAM = m.mem.RAM
+		return s
+	}
+	s.Model128 = true
+	s.Banks = m.banks
+	s.Page = m.page
+	s.AYSel = byte(m.ay.sel)
+	s.AYReg = m.ay.reg
+	return s
+}
 
 func (m *Machine) SetError(text string) {
 	m.errorText = text
@@ -463,6 +515,9 @@ func (m *Machine) MemWrite(addr uint16, v byte) { m.writeMem(addr, v) }
 func (m *Machine) IORead(port uint16) byte {
 	if port&1 == 0 {
 		return m.readULA(port)
+	}
+	if port&0x20 == 0 {
+		return m.joy
 	}
 	if m.model128 {
 		if port&0xC002 == 0xC000 {

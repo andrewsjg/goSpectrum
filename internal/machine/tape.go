@@ -14,10 +14,15 @@ type Player struct {
 	level    bool
 	playing  bool
 	forceLow bool
+	pos      int
+	total    int
 }
 
 func (p *Player) Arm(edges []Pulse, forceLow bool) {
 	*p = Player{edges: append([]Pulse(nil), edges...), forceLow: forceLow}
+	for _, e := range p.edges {
+		p.total += e.Dur
+	}
 	if len(p.edges) == 0 {
 		p.level = false
 		return
@@ -50,6 +55,18 @@ func (p *Player) finish() {
 
 func (p *Player) Playing() bool { return p.playing }
 
+// Progress is the fraction of T-states played. A finished tape is 1, and an
+// empty one is 0.
+func (p *Player) Progress() float64 {
+	if p.total <= 0 {
+		return 0
+	}
+	if !p.playing {
+		return 1
+	}
+	return float64(p.pos) / float64(p.total)
+}
+
 // Stop ends playback and forces the EAR level low. A TZX pause of 0 ms does this.
 func (p *Player) Stop() {
 	p.playing = false
@@ -70,6 +87,7 @@ func (p *Player) Advance(n int) {
 	if !p.playing || n <= 0 {
 		return
 	}
+	p.pos += n
 	for n > 0 && p.playing {
 		if p.left > n {
 			p.left -= n

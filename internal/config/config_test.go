@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -114,5 +115,33 @@ func TestBadNames(t *testing.T) {
 	got, err := ValidName("  Foo.JSON  ")
 	if err != nil || got != "Foo" {
 		t.Fatalf("%q %v", got, err)
+	}
+}
+
+func TestRecent(t *testing.T) {
+	dir := t.TempDir()
+	if LoadRecent(dir) != nil {
+		t.Fatal("missing file is not empty")
+	}
+	for i := 0; i < 10; i++ {
+		if err := AddRecent(dir, Recent{Model: "48", Path: filepath.Join(dir, fmt.Sprintf("g%d.tap", i))}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	again := filepath.Join(dir, "g5.tap")
+	if err := AddRecent(dir, Recent{Model: "128", Path: again}); err != nil {
+		t.Fatal(err)
+	}
+	got := LoadRecent(dir)
+	if len(got) != maxRecent || got[0] != (Recent{Model: "128", Path: again}) || got[1].Path != filepath.Join(dir, "g9.tap") {
+		t.Fatalf("recent %v", got)
+	}
+	for _, r := range got[1:] {
+		if r.Path == again {
+			t.Fatal("duplicate path kept")
+		}
+	}
+	if names, _ := List(dir); len(names) != 0 {
+		t.Fatalf("recent list shows as a config: %v", names)
 	}
 }

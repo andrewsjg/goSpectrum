@@ -56,6 +56,30 @@ func TestZ80V3RoundTrip(t *testing.T) {
 	}
 }
 
+func TestZ80V3RoundTrip128(t *testing.T) {
+	s := sampleSnap()
+	s.RAM = [49152]byte{}
+	s.Machine128 = true
+	s.Page = 0x13
+	s.AYSel = 7
+	s.AYReg[0] = 0x42
+	s.AYReg[13] = 0x0E
+	for bank := range s.Banks {
+		s.Banks[bank][0] = byte(0xA0 + bank)
+		s.Banks[bank][16383] = byte(bank)
+	}
+	got, err := ReadZ80(WriteZ80(s))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Machine128 || got.Regs != s.Regs || got.Banks != s.Banks || got.Page != 0x13 {
+		t.Fatalf("128K round trip page %02X", got.Page)
+	}
+	if got.AYSel != 7 || got.AYReg != s.AYReg {
+		t.Fatal("AY registers")
+	}
+}
+
 func TestZ80V1Compression(t *testing.T) {
 	hdr := make([]byte, 30)
 	binary.LittleEndian.PutUint16(hdr[6:], 1)

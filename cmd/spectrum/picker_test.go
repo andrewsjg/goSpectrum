@@ -228,7 +228,7 @@ func TestLayoutScrollsTapeList(t *testing.T) {
 	for i := 0; i < 30; i++ {
 		items = append(items, tapeItem{path: fmt.Sprintf("/g/%02d.tap", i), label: fmt.Sprintf("%02d.tap", i)})
 	}
-	rows := makeRows(nil, items)
+	rows := makeRows(nil, items, nil)
 	browse := -1
 	for i, r := range rows {
 		if r.kind == kindBrowse {

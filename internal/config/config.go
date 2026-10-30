@@ -176,3 +176,56 @@ func List(dir string) ([]string, error) {
 	sort.Strings(names)
 	return names, nil
 }
+
+// SavesDir holds save-state snapshots, one per program.
+func SavesDir(dir string) string { return filepath.Join(dir, "saves") }
+
+// Recent is a program file started from disk and the model it ran on.
+type Recent struct {
+	Model string
+	Path  string
+}
+
+// maxRecent bounds the recent list.
+const maxRecent = 8
+
+// recentFile is not .json so List never offers it as a config. Each line is
+// the model, a space, and the absolute path.
+const recentFile = "recent.txt"
+
+// LoadRecent returns the recent list, newest first. A missing or unreadable
+// file is an empty list, and malformed lines are skipped.
+func LoadRecent(dir string) []Recent {
+	raw, err := os.ReadFile(filepath.Join(dir, recentFile))
+	if err != nil {
+		return nil
+	}
+	var out []Recent
+	for _, line := range strings.Split(string(raw), "\n") {
+		model, path, ok := strings.Cut(line, " ")
+		if !ok || (model != "48" && model != "128") || !filepath.IsAbs(path) {
+			continue
+		}
+		out = append(out, Recent{Model: model, Path: path})
+	}
+	return out
+}
+
+// AddRecent moves r to the front of the list, dropping an older entry for
+// the same path and anything past maxRecent.
+func AddRecent(dir string, r Recent) error {
+	list := []Recent{r}
+	for _, old := range LoadRecent(dir) {
+		if old.Path != r.Path && len(list) < maxRecent {
+			list = append(list, old)
+		}
+	}
+	var b strings.Builder
+	for _, e := range list {
+		fmt.Fprintf(&b, "%s %s\n", e.Model, e.Path)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, recentFile), []byte(b.String()), 0o644)
+}

@@ -66,21 +66,25 @@ func FrameRGBA(fr machine.Frame) []byte {
 	return buf
 }
 
-// DrawFrame paints the frame with nearest-neighbor integer scale, centered
-// on black. Paper pixels stay square.
-func DrawFrame(screen *ebiten.Image, img *ebiten.Image, fr machine.Frame) {
+// FrameOrigin is the integer scale and top-left of the frame centered in a
+// window, the placement DrawFrame uses.
+func FrameOrigin(winW, winH int) (scale, ox, oy int) {
+	scale = FitScale(winW, winH)
+	return scale, (winW - machine.VisibleW*scale) / 2, (winH - machine.VisibleH*scale) / 2
+}
+
+// DrawFrame paints img, a VisibleW×VisibleH frame, with nearest-neighbor
+// integer scale, centered on black. Paper pixels stay square.
+func DrawFrame(screen *ebiten.Image, img *ebiten.Image) {
 	screen.Fill(color.Black)
 	if img == nil {
 		return
 	}
-	img.WritePixels(FrameRGBA(fr))
 	b := screen.Bounds()
-	s := FitScale(b.Dx(), b.Dy())
+	s, ox, oy := FrameOrigin(b.Dx(), b.Dy())
 	op := &ebiten.DrawImageOptions{}
 	op.Filter = ebiten.FilterNearest
 	op.GeoM.Scale(float64(s), float64(s))
-	vw := machine.VisibleW * s
-	vh := machine.VisibleH * s
-	op.GeoM.Translate(float64(b.Dx()-vw)/2, float64(b.Dy()-vh)/2)
+	op.GeoM.Translate(float64(ox), float64(oy))
 	screen.DrawImage(img, op)
 }

@@ -250,7 +250,9 @@ func decompress(src []byte, withMarker bool, outLen int) ([]byte, error) {
 	return out, nil
 }
 
-// WriteZ80 emits a v3 48K file, hardware mode 0, with raw pages 8, 4, and 5.
+// WriteZ80 emits a v3 file with raw pages. A 48K is hardware mode 0 with
+// pages 8, 4, and 5. A 128K is mode 4 with banks 0..7 as pages 3..10, the
+// 0x7FFD latch, and the AY registers.
 func WriteZ80(s Snapshot) []byte {
 	var hdr [86]byte
 	hdr[0] = s.Regs.A
@@ -283,8 +285,18 @@ func WriteZ80(s Snapshot) []byte {
 	hdr[29] = s.Regs.IM & 3
 	binary.LittleEndian.PutUint16(hdr[30:], 54)
 	binary.LittleEndian.PutUint16(hdr[32:], s.Regs.PC)
-	hdr[34] = 0
 	var buf bytes.Buffer
+	if s.Machine128 {
+		hdr[34] = 4
+		hdr[35] = s.Page
+		hdr[38] = s.AYSel
+		copy(hdr[39:55], s.AYReg[:])
+		buf.Write(hdr[:])
+		for bank := range s.Banks {
+			writeRawPage(&buf, byte(bank+3), s.Banks[bank][:])
+		}
+		return buf.Bytes()
+	}
 	buf.Write(hdr[:])
 	writeRawPage(&buf, 8, s.RAM[0:16384])
 	writeRawPage(&buf, 4, s.RAM[16384:32768])

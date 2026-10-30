@@ -56,12 +56,15 @@ const (
 	kindSave
 )
 
+// menuRow is one chooser line. note, such as "Recent" or "Saved state",
+// leads the detail line of a tape.
 type menuRow struct {
 	kind   rowKind
 	label  string
 	config string
 	model  string
 	tape   string
+	note   string
 }
 
 func (r menuRow) selectable() bool { return r.kind != kindHeader }
@@ -69,7 +72,11 @@ func (r menuRow) selectable() bool { return r.kind != kindHeader }
 type tapeItem struct {
 	path  string
 	label string
+	note  string
 }
+
+// savedLabel is the folder name save states show under in the list.
+const savedLabel = "Saved states"
 
 // pickerResult is a finished choice. Quit leaves the process.
 // ConfigName launches that saved file. Otherwise Model and Tape launch
@@ -87,6 +94,7 @@ type pickerResult struct {
 type picker struct {
 	workDir    string
 	configDir  string
+	recent     []config.Recent
 	dirLabel   string
 	rows       []menuRow
 	cursor     int
@@ -107,10 +115,39 @@ func newPicker(workDir, configDir string) (*picker, error) {
 		dirLabel:  shortenDir(configDir),
 		model:     "48",
 	}
+	p.loadRecent()
+	// The last program played is selected, so Start replays it.
+	if len(p.recent) > 0 {
+		p.model, p.tape = p.recent[0].Model, p.recent[0].Path
+	}
 	if err := p.rebuild(true); err != nil {
 		return nil, err
 	}
 	return p, nil
+}
+
+// loadRecent keeps the recent entries whose files still exist.
+func (p *picker) loadRecent() {
+	p.recent = nil
+	for _, r := range config.LoadRecent(p.configDir) {
+		if st, err := os.Stat(r.Path); err == nil && !st.IsDir() {
+			p.recent = append(p.recent, r)
+		}
+	}
+}
+
+// reopen shows the chooser again after a game, with the recent list and
+// save states refreshed and the previous choice kept.
+func (p *picker) reopen() {
+	p.done = false
+	p.result = pickerResult{}
+	p.naming = false
+	p.wantBrowse = false
+	p.status = ""
+	p.loadRecent()
+	if err := p.rebuild(false); err != nil {
+		p.status = err.Error()
+	}
 }
 
 func (p *picker) Result() (pickerResult, bool) {
@@ -289,12 +326,20 @@ func (p *picker) rebuild(initial bool) error {
 	if err != nil {
 		return err
 	}
-	files := listTapes(p.workDir)
-	if p.tape != "" && !hasTape(files, p.tape) {
-		files = append(files, tapeItem{path: p.tape, label: displayRel(p.workDir, p.tape)})
-		sortTapes(files)
+	files := listTapes(p.workDir, config.SavesDir(p.configDir))
+	extra := []string{p.tape}
+	var recent []string
+	for _, r := range p.recent {
+		extra = append(extra, r.Path)
+		recent = append(recent, r.Path)
 	}
-	p.rows = makeRows(names, files)
+	for _, path := range extra {
+		if path != "" && !hasTape(files, path) {
+			files = append(files, tapeItem{path: path, label: displayRel(p.workDir, path)})
+		}
+	}
+	sortTapes(files)
+	p.rows = makeRows(names, files, recent)
 	if initial {
 		p.cursor = firstCursor(p.rows)
 		return nil
@@ -355,7 +400,9 @@ func firstCursor(rows []menuRow) int {
 	return 0
 }
 
-func makeRows(configs []string, files []tapeItem) []menuRow {
+// makeRows lists recent programs, newest first, straight after No tape,
+// then every other file in name order.
+func makeRows(configs []string, files []tapeItem, recent []string) []menuRow {
 	var rows []menuRow
 	if len(configs) > 0 {
 		rows = append(rows, menuRow{kind: kindHeader, label: "Saved configs"})
@@ -370,8 +417,26 @@ func makeRows(configs []string, files []tapeItem) []menuRow {
 		menuRow{kind: kindHeader, label: "Tape or snapshot"},
 		menuRow{kind: kindTape, label: "No tape"},
 	)
+	tapeRow := func(f tapeItem, isRecent bool) menuRow {
+		note := f.note
+		if isRecent {
+			note = strings.TrimSuffix("Recent, "+note, ", ")
+		}
+		return menuRow{kind: kindTape, label: f.label, tape: f.path, note: note}
+	}
+	seen := map[string]bool{}
+	for _, path := range recent {
+		for _, f := range files {
+			if f.path == path && !seen[path] {
+				rows = append(rows, tapeRow(f, true))
+				seen[path] = true
+			}
+		}
+	}
 	for _, f := range files {
-		rows = append(rows, menuRow{kind: kindTape, label: f.label, tape: f.path})
+		if !seen[f.path] {
+			rows = append(rows, tapeRow(f, false))
+		}
 	}
 	rows = append(rows,
 		menuRow{kind: kindBrowse, label: "Browse..."},
@@ -461,9 +526,10 @@ func (p *picker) summary() string {
 	return p.model + "K   " + tape
 }
 
-func listTapes(work string) []tapeItem {
+// listTapes finds programs in work, work/Games, and the save-state folder.
+func listTapes(work, saves string) []tapeItem {
 	var items []tapeItem
-	scan := func(dir string) {
+	scan := func(dir, label, note string) {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			return
@@ -480,11 +546,16 @@ func listTapes(work string) []tapeItem {
 			if a, err := filepath.Abs(abs); err == nil {
 				abs = a
 			}
-			items = append(items, tapeItem{path: abs, label: displayRel(work, abs)})
+			l := displayRel(work, abs)
+			if label != "" {
+				l = filepath.Join(label, name)
+			}
+			items = append(items, tapeItem{path: abs, label: l, note: note})
 		}
 	}
-	scan(work)
-	scan(filepath.Join(work, "Games"))
+	scan(work, "", "")
+	scan(filepath.Join(work, "Games"), "", "")
+	scan(saves, savedLabel, "Saved state")
 	sortTapes(items)
 	return items
 }

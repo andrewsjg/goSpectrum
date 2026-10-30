@@ -8,16 +8,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
-
-	"github.com/hajimehoshi/ebiten/v2"
-	"image/color"
 
 	"go.spectrum/internal/config"
 	"go.spectrum/internal/formats"
 	"go.spectrum/internal/machine"
-	"go.spectrum/internal/timing"
-	"go.spectrum/internal/ui"
 )
 
 const version = "0.1.0"
@@ -41,8 +35,12 @@ Options:
   --version          print the version
 `
 
-// Session is one process: a machine plus the options that built it.
+// Session is one running program: a machine plus the options that built it.
+// Launch rebuilds it for Restart. Path is the absolute program file, empty
+// for BASIC or a dropped file.
 type Session struct {
+	Launch       launch
+	Path         string
 	Mach         *machine.Machine
 	Scale        int
 	Sound        bool
@@ -157,13 +155,15 @@ func Execute(args []string, opt Option) int {
 	}
 
 	chooser := flags.file == "" && *configFlag == "" && !flags.modelSet && !flags.romSet
+	// The chooser and --config need the config directory. A direct start
+	// runs without one and only loses saves, recents, and the chooser.
+	cfgDir, cfgErr := config.Dir(opt.ConfigDir)
 	if chooser {
 		if opt.Start != nil {
 			return 0
 		}
-		cfgDir, err := config.Dir(opt.ConfigDir)
-		if err != nil {
-			fmt.Fprintf(stderr, "spectrum: %v\n", err)
+		if cfgErr != nil {
+			fmt.Fprintf(stderr, "spectrum: %v\n", cfgErr)
 			return 1
 		}
 		return runChooser(opt.ExeDir, work, cfgDir, stderr, flags)
@@ -171,9 +171,8 @@ func Execute(args []string, opt Option) int {
 
 	var cfg *config.File
 	if *configFlag != "" {
-		cfgDir, err := config.Dir(opt.ConfigDir)
-		if err != nil {
-			fmt.Fprintf(stderr, "spectrum: %v\n", err)
+		if cfgErr != nil {
+			fmt.Fprintf(stderr, "spectrum: %v\n", cfgErr)
 			return 1
 		}
 		path, err := config.Resolve(cfgDir, *configFlag)
@@ -199,7 +198,10 @@ func Execute(args []string, opt Option) int {
 	if opt.Start != nil {
 		return opt.Start(sess)
 	}
-	return run(sess)
+	if cfgErr != nil {
+		cfgDir = ""
+	}
+	return runDirect(sess, opt.ExeDir, work, cfgDir, stderr, flags)
 }
 
 // cliFlags records which options were present on the command line.
@@ -222,6 +224,8 @@ type cliFlags struct {
 
 // launch is the machine a direct start or a chooser choice asked for.
 // ModelExplicit stops a 128K snapshot from changing a chosen 48K machine.
+// Data, when set, is the program itself and File is only its name; a file
+// dropped on the window has no path.
 type launch struct {
 	Model         string
 	ModelExplicit bool
@@ -231,6 +235,7 @@ type launch struct {
 	Realtime      bool
 	NoAutoload    bool
 	File          string
+	Data          []byte
 }
 
 func mergeLaunch(cfg *config.File, f cliFlags) launch {
@@ -303,7 +308,7 @@ func stayOnPicker(err error) bool {
 
 func buildSession(l launch, exeDir, work string) (*Session, error) {
 	path := l.File
-	if path != "" && !filepath.IsAbs(path) {
+	if path != "" && !filepath.IsAbs(path) && l.Data == nil {
 		path = filepath.Join(work, path)
 	}
 	var (
@@ -313,8 +318,20 @@ func buildSession(l launch, exeDir, work string) (*Session, error) {
 		snap    *formats.Snapshot
 	)
 	if path != "" {
+		data := l.Data
+		if data == nil {
+			if err := checkExt(path); err != nil {
+				return nil, err
+			}
+			var err error
+			if data, err = os.ReadFile(path); err != nil {
+				return nil, fmt.Errorf("%s: %v", path, err)
+			}
+		} else {
+			path = ""
+		}
 		var err error
-		name, tape, snap, errText, err = loadProgram(path)
+		name, tape, snap, errText, err = loadProgram(l.File, data)
 		if err != nil {
 			return nil, err
 		}
@@ -353,6 +370,8 @@ func buildSession(l launch, exeDir, work string) (*Session, error) {
 		notice = "sound off"
 	}
 	return &Session{
+		Launch:       l,
+		Path:         path,
 		Mach:         m,
 		Scale:        l.Scale,
 		Sound:        l.Sound,
@@ -364,19 +383,24 @@ func buildSession(l launch, exeDir, work string) (*Session, error) {
 	}, nil
 }
 
-func loadProgram(path string) (name string, tape *formats.Tape, snap *formats.Snapshot, errText string, err error) {
-	name = filepath.Base(path)
-	ext := strings.ToLower(filepath.Ext(path))
-	switch ext {
+// checkExt refuses a file the emulator cannot load, by extension.
+func checkExt(path string) error {
+	switch ext := strings.ToLower(filepath.Ext(path)); ext {
 	case ".tap", ".tzx", ".sna", ".z80":
+		return nil
 	default:
-		return "", nil, nil, "", fmt.Errorf("%s: unknown extension %q (supported: .tap, .tzx, .sna, .z80)", path, ext)
+		return fmt.Errorf("%s: unknown extension %q (supported: .tap, .tzx, .sna, .z80)", path, ext)
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", nil, nil, "", fmt.Errorf("%s: %v", path, err)
+}
+
+// loadProgram decodes a program by the extension of path. A file that
+// does not decode is not an error: errText is shown and the machine runs.
+func loadProgram(path string, data []byte) (name string, tape *formats.Tape, snap *formats.Snapshot, errText string, err error) {
+	if err := checkExt(path); err != nil {
+		return "", nil, nil, "", err
 	}
-	switch ext {
+	name = filepath.Base(path)
+	switch strings.ToLower(filepath.Ext(path)) {
 	case ".tap":
 		_, t, err := formats.ReadTAP(data)
 		if err != nil {
@@ -475,6 +499,34 @@ func toSnap(s formats.Snapshot) machine.Snap {
 	}
 }
 
+// fromSnap is toSnap in reverse, for writing a save state.
+func fromSnap(s machine.Snap) formats.Snapshot {
+	return formats.Snapshot{
+		Regs: formats.Regs{
+			A: s.A, F: s.F,
+			B: s.B, C: s.C,
+			D: s.D, E: s.E,
+			H: s.H, L: s.L,
+			Ap: s.Ap, Fp: s.Fp,
+			Bp: s.Bp, Cp: s.Cp,
+			Dp: s.Dp, Ep: s.Ep,
+			Hp: s.Hp, Lp: s.Lp,
+			IX: s.IX, IY: s.IY,
+			SP: s.SP, PC: s.PC,
+			I: s.I, R: s.R,
+			IFF1: s.IFF1, IFF2: s.IFF2,
+			IM: s.IM,
+		},
+		RAM:        s.RAM,
+		Border:     s.Border,
+		Machine128: s.Model128,
+		Banks:      s.Banks,
+		Page:       s.Page,
+		AYSel:      s.AYSel,
+		AYReg:      s.AYReg,
+	}
+}
+
 func toPulses(in []formats.Pulse) []machine.Pulse {
 	out := make([]machine.Pulse, len(in))
 	for i, p := range in {
@@ -482,119 +534,3 @@ func toPulses(in []formats.Pulse) []machine.Pulse {
 	}
 	return out
 }
-
-// run opens the window. F1 toggles pause. Ctrl+Q and the close button exit 0.
-func run(s *Session) int {
-	prepareWindow(s.Scale)
-	app, aud := openMachine(s)
-	defer aud.Close()
-	if err := ebiten.RunGame(app); err != nil {
-		fmt.Fprintf(os.Stderr, "spectrum: %v\n", err)
-		return 1
-	}
-	return 0
-}
-
-func prepareWindow(scale int) {
-	w, h := ui.WindowSize(scale)
-	ebiten.SetWindowSize(w, h)
-	ebiten.SetWindowSizeLimits(machine.VisibleW, machine.VisibleH, -1, -1)
-	ebiten.SetWindowResizingMode(ebiten.WindowResizingModeEnabled)
-	ebiten.SetWindowClosingHandled(true)
-}
-
-// openMachine starts audio and draws the first frame. The chooser does not
-// call this until a machine is actually launched.
-func openMachine(s *Session) (*app, *ui.Audio) {
-	aud := ui.OpenAudio(s.Sound)
-	notice := aud.Notice()
-	if notice == "" {
-		notice = s.Notice
-	}
-	app := &app{
-		m:        s.Mach,
-		audio:    aud,
-		name:     s.Name,
-		notice:   notice,
-		realtime: s.RealtimeTape,
-		screen:   ebiten.NewImage(machine.VisibleW, machine.VisibleH),
-	}
-	turbo := s.Mach.TapePlaying() && !s.RealtimeTape
-	s.Mach.SetTurbo(turbo)
-	app.clock.SetTurbo(turbo)
-	fr, samples := s.Mach.RunFrame()
-	if !turbo {
-		aud.Push(samples)
-	}
-	app.frame = fr
-	app.have = true
-	ebiten.SetWindowTitle(ui.Title(s.Name, s.Mach.Status(), s.Mach.ErrorText(), notice))
-	return app, aud
-}
-
-type app struct {
-	m        *machine.Machine
-	audio    *ui.Audio
-	input    ui.Input
-	clock    timing.Clock
-	name     string
-	notice   string
-	realtime bool
-	screen   *ebiten.Image
-	frame    machine.Frame
-	have     bool
-	last     time.Time
-}
-
-func (a *app) Update() error {
-	rows, toggle, quit := a.input.Poll(ui.EbitenDown)
-	if quit || ebiten.IsWindowBeingClosed() {
-		return ebiten.Termination
-	}
-	a.m.SetHostKeys(rows)
-	if toggle {
-		a.m.TogglePause()
-	}
-	turbo := a.m.TapePlaying() && !a.realtime
-	if turbo != a.clock.Turbo() {
-		a.clock.SetTurbo(turbo)
-	}
-	a.m.SetTurbo(turbo)
-	ebiten.SetWindowTitle(ui.Title(a.name, a.m.Status(), a.m.ErrorText(), a.notice))
-	if a.m.Paused() {
-		a.m.RunFrame()
-		return nil
-	}
-	if turbo {
-		deadline := time.Now().Add(12 * time.Millisecond)
-		for n := 0; n < 400 && time.Now().Before(deadline); n++ {
-			a.frame, _ = a.m.RunFrame()
-			a.have = true
-		}
-		return nil
-	}
-	now := time.Now()
-	var dt int64
-	if !a.last.IsZero() {
-		dt = now.Sub(a.last).Nanoseconds()
-	}
-	a.last = now
-	n := a.clock.Tick(dt, false)
-	for i := 0; i < n; i++ {
-		var samples []int16
-		a.frame, samples = a.m.RunFrame()
-		a.have = true
-		a.audio.Push(samples)
-	}
-	return nil
-}
-
-func (a *app) Draw(screen *ebiten.Image) {
-	if !a.have {
-		screen.Fill(color.Black)
-		return
-	}
-	ui.DrawFrame(screen, a.screen, a.frame)
-}
-
-func (a *app) Layout(w, h int) (int, int) { return w, h }

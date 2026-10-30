@@ -1,9 +1,7 @@
 package main
 
 import (
-	"fmt"
 	"image/color"
-	"io"
 	"path/filepath"
 	"strings"
 
@@ -221,12 +219,12 @@ func (g *pickerGame) drawRow(off *ebiten.Image, pl placed) {
 		}
 		fillRect(off, b, bg)
 		strokeRect(off, b, edge)
-		g.centerText(off, r.label, b, b.y+8, 2, colText)
+		centerText(g.font, off, r.label, b, b.y+8, 2, colText)
 		sub := "Original"
 		if r.model == "128" {
 			sub = "AY sound"
 		}
-		g.centerText(off, sub, b, b.y+28, 1, colDim)
+		centerText(g.font, off, sub, b, b.y+28, 1, colDim)
 		if chosen {
 			vector.FillCircle(off, float32(b.x+b.w-8), float32(b.y+8), 3, colMark, true)
 		}
@@ -239,7 +237,7 @@ func (g *pickerGame) drawRow(off *ebiten.Image, pl placed) {
 		}
 		fillRect(off, b, bg)
 		strokeRect(off, b, edge)
-		g.centerText(off, "SAVE CONFIG", b, b.y+7, 1, colText)
+		centerText(g.font, off, "SAVE CONFIG", b, b.y+7, 1, colText)
 	case kindStart:
 		bg := colGo
 		if cursor || pl.row == g.hover {
@@ -249,7 +247,7 @@ func (g *pickerGame) drawRow(off *ebiten.Image, pl placed) {
 		if cursor {
 			strokeRect(off, b, colText)
 		}
-		g.centerText(off, "START "+p.model+"K", b, b.y+7, 1, colText)
+		centerText(g.font, off, "START "+p.model+"K", b, b.y+7, 1, colText)
 	default:
 		g.drawListRow(off, pl, r, cursor)
 	}
@@ -276,7 +274,7 @@ func (g *pickerGame) drawListRow(off *ebiten.Image, pl placed, r menuRow, cursor
 	switch {
 	case r.kind == kindBrowse:
 		g.font.Text(off, "+", b.x+28, b.y+7, 1, colAccent)
-		title, detail = "Browse...", "Open a file from anywhere"
+		title, detail = "Browse...", "Or drop a file on the window"
 	case r.tape == "":
 		title, detail = r.label, "Start in BASIC"
 	default:
@@ -284,6 +282,9 @@ func (g *pickerGame) drawListRow(off *ebiten.Image, pl placed, r menuRow, cursor
 		fillRect(off, box{b.x + 18, b.y + 5, 28, 12}, badges[ext])
 		g.font.Text(off, strings.ToUpper(ext[1:]), b.x+20, b.y+7, 1, colText)
 		title, detail = prettyName(r.label)
+		if detail == savedLabel {
+			detail = ""
+		}
 	}
 	if r.kind == kindTape {
 		cx, cy := float32(b.x+9), float32(b.y+11)
@@ -294,6 +295,12 @@ func (g *pickerGame) drawListRow(off *ebiten.Image, pl placed, r menuRow, cursor
 		}
 	}
 	g.font.Text(off, fitText(title, chars), textX, b.y+2, 1, colText)
+	if r.note != "" {
+		g.font.Text(off, r.note, textX, b.y+12, 1, colAccent)
+		n := len(r.note) + 2
+		textX += n * ui.GlyphW
+		chars -= n
+	}
 	g.font.Text(off, fitText(detail, chars), textX, b.y+12, 1, colDim)
 }
 
@@ -333,8 +340,9 @@ func (g *pickerGame) drawPrompt(off *ebiten.Image) {
 	g.font.Text(off, "ENTER save   ESC cancel", d.x+12, d.y+76, 1, colDim)
 }
 
-func (g *pickerGame) centerText(off *ebiten.Image, s string, b box, y, scale int, c color.Color) {
-	g.font.Text(off, s, b.x+(b.w-len(s)*ui.GlyphW*scale)/2, y, scale, c)
+// centerText draws s centered across b at height y.
+func centerText(f *ui.Font, dst *ebiten.Image, s string, b box, y, scale int, c color.Color) {
+	f.Text(dst, s, b.x+(b.w-len(s)*ui.GlyphW*scale)/2, y, scale, c)
 }
 
 func fillRect(dst *ebiten.Image, b box, c color.Color) {
@@ -364,6 +372,9 @@ func fitText(s string, n int) string {
 	if len(r) <= n {
 		return s
 	}
+	if n <= 0 {
+		return ""
+	}
 	if n <= 3 {
 		return string(r[:n])
 	}
@@ -374,113 +385,6 @@ func ctrlDown() bool {
 	return ebiten.IsKeyPressed(ebiten.KeyControl) ||
 		ebiten.IsKeyPressed(ebiten.KeyControlLeft) ||
 		ebiten.IsKeyPressed(ebiten.KeyControlRight)
-}
-
-// shell is the one window. It shows the chooser, then the machine.
-// A missing ROM stays on the chooser. RunGame is called once.
-type shell struct {
-	pick   *pickerGame
-	app    *app
-	audio  interface{ Close() }
-	exe    string
-	work   string
-	cfgDir string
-	stderr io.Writer
-	flags  cliFlags
-	code   int
-}
-
-func (s *shell) Update() error {
-	if s.app != nil {
-		return s.app.Update()
-	}
-	if err := s.pick.Update(); err != nil {
-		return err
-	}
-	p := s.pick.p
-	if !p.done {
-		return nil
-	}
-	res := p.result
-	if res.Quit || !res.Go {
-		return ebiten.Termination
-	}
-	l, err := resultToLaunch(res, s.cfgDir, s.flags)
-	if err != nil {
-		fmt.Fprintf(s.stderr, "spectrum: %v\n", err)
-		p.fail(err.Error())
-		return nil
-	}
-	sess, err := buildSession(l, s.exe, s.work)
-	if err != nil {
-		fmt.Fprintf(s.stderr, "spectrum: %v\n", err)
-		if stayOnPicker(err) {
-			p.fail(err.Error())
-			return nil
-		}
-		s.code = 1
-		return ebiten.Termination
-	}
-	if sess.ErrorText != "" {
-		fmt.Fprintf(s.stderr, "spectrum: %s\n", sess.ErrorText)
-	}
-	s.enter(sess)
-	return nil
-}
-
-func (s *shell) Draw(screen *ebiten.Image) {
-	if s.app != nil {
-		s.app.Draw(screen)
-		return
-	}
-	s.pick.Draw(screen)
-}
-
-func (s *shell) Layout(w, h int) (int, int) {
-	if s.app != nil {
-		return s.app.Layout(w, h)
-	}
-	return s.pick.Layout(w, h)
-}
-
-func (s *shell) enter(sess *Session) {
-	prepareWindow(sess.Scale)
-	a, aud := openMachine(sess)
-	s.app = a
-	s.audio = aud
-}
-
-func runChooser(exe, work, cfgDir string, stderr io.Writer, flags cliFlags) int {
-	p, err := newPicker(work, cfgDir)
-	if err != nil {
-		fmt.Fprintf(stderr, "spectrum: %v\n", err)
-		return 1
-	}
-	sh := &shell{
-		pick:   newPickerGame(p, chooserFont(exe, work)),
-		exe:    exe,
-		work:   work,
-		cfgDir: cfgDir,
-		stderr: stderr,
-		flags:  flags,
-	}
-	ebiten.SetWindowSize(pickerW*2, pickerH*2)
-	ebiten.SetWindowSizeLimits(pickerW, pickerH, -1, -1)
-	ebiten.SetWindowResizingMode(ebiten.WindowResizingModeEnabled)
-	ebiten.SetWindowClosingHandled(true)
-	ebiten.SetWindowTitle("goSpectrum")
-	err = ebiten.RunGame(sh)
-	if sh.audio != nil {
-		sh.audio.Close()
-	}
-	if sh.code != 0 {
-		return sh.code
-	}
-	if err != nil {
-		fmt.Fprintf(stderr, "spectrum: %v\n", err)
-		return 1
-	}
-	return 0
 }
 
 // chooserFont reads the character set from whichever ROM is present. A

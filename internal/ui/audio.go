@@ -15,34 +15,54 @@ import (
 type Audio struct {
 	notice string
 	on     bool
+	failed bool
 	player *audio.Player
 	q      *pcmQueue
 }
 
-// OpenAudio starts the player when enabled is true.
+// OpenAudio starts the player when enabled is true. Open one Audio per
+// process and switch it with SetEnabled.
 // Tests must not call this: NewContext panics if a context already exists.
 func OpenAudio(enabled bool) *Audio {
-	a := &Audio{q: &pcmQueue{}}
-	if !enabled {
-		a.notice = "sound off"
-		return a
-	}
-	ctx, err := newAudioContext()
-	if err != nil {
-		a.notice = "sound unavailable"
-		return a
-	}
-	p, err := ctx.NewPlayer(a.q)
-	if err != nil {
-		a.notice = "sound unavailable"
-		return a
-	}
-	p.SetBufferSize(50 * time.Millisecond)
-	p.Play()
-	a.player = p
-	a.on = true
+	a := &Audio{q: &pcmQueue{}, notice: "sound off"}
+	a.SetEnabled(enabled)
 	return a
 }
+
+// SetEnabled turns sound on or off. The player is created the first time
+// sound is turned on. If that fails, sound stays off and the notice says so.
+func (a *Audio) SetEnabled(on bool) {
+	if !on {
+		if a.player != nil {
+			a.player.Pause()
+		}
+		a.on = false
+		a.notice = "sound off"
+		return
+	}
+	if a.player == nil {
+		if a.failed {
+			return
+		}
+		ctx, err := newAudioContext()
+		if err == nil {
+			a.player, err = ctx.NewPlayer(a.q)
+		}
+		if err != nil {
+			a.failed = true
+			a.notice = "sound unavailable"
+			return
+		}
+		a.player.SetBufferSize(50 * time.Millisecond)
+	}
+	a.q.reset()
+	a.player.Play()
+	a.on = true
+	a.notice = ""
+}
+
+// Enabled reports that sound is playing.
+func (a *Audio) Enabled() bool { return a != nil && a.on }
 
 func newAudioContext() (ctx *audio.Context, err error) {
 	defer func() {
@@ -110,6 +130,12 @@ func (q *pcmQueue) write(p []byte) {
 	if len(q.buf) > max {
 		q.buf = append([]byte(nil), q.buf[len(q.buf)-max:]...)
 	}
+	q.mu.Unlock()
+}
+
+func (q *pcmQueue) reset() {
+	q.mu.Lock()
+	q.buf = nil
 	q.mu.Unlock()
 }
 
